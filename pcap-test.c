@@ -90,7 +90,7 @@ void print_ipv4(struct in_addr addr) {
 // packet_interpret() 함수 - TCP 패킷인 경우에만 Ethernet header, IP header, TCP header, Payload(최대 MAX_PRINT_LEN 바이트)를 Display
 void packet_interpret(const u_char* packet, const struct pcap_pkthdr* header)
 {
-    // [Check] TCP Packet Size Check
+    // [Check] TCP Packet Size Check (기본 헤더 사이즈)
     if (header->caplen < sizeof(struct libnet_ethernet_hdr) + sizeof(struct libnet_ipv4_hdr)) // 패킷이 TCP 최소 크기를 만족하지 못함
         return; 
 
@@ -106,6 +106,14 @@ void packet_interpret(const u_char* packet, const struct pcap_pkthdr* header)
     struct libnet_ipv4_hdr* ip_hdr = (struct libnet_ipv4_hdr*) ip_packet;
     int ip_hdr_len = ip_hdr->ip_hl * 4; // IP 헤더 길이 (ip_hl가 4byte 단위임.)
 
+    // [Check] 최소 IP 헤더 길이: ip_hl가 최소 5(20바이트)여야 함.
+    if ((ip_hdr->ip_hl & 0x0F) < 5)
+        return;
+
+    // [Check] 캡처된 길이가 Ethernet + IP 헤더 길이보다 작은지 확인
+    if (header->caplen < sizeof(struct libnet_ethernet_hdr) + ip_hdr_len)
+        return;
+
     // [Check] Check if TCP(6) - 참고로, IPPROTO_TCP가 6임!
     if (ip_hdr->ip_p != IPPROTO_TCP) 
         return;
@@ -115,10 +123,29 @@ void packet_interpret(const u_char* packet, const struct pcap_pkthdr* header)
     struct libnet_tcp_hdr* tcp_hdr = (struct libnet_tcp_hdr*) tcp_packet;
     int tcp_hdr_len = tcp_hdr->th_off * 4; // TCP 헤더 길이 (tcp_off가 4byte 단위임.)
 
-    // Payload의 시작 위치 및 길이 계산을 통해 추후 Payload 추출 가능하게 함. 
-    const u_char* data = tcp_packet + tcp_hdr_len;
+    // 전체 헤더 길이 계산 (Ethernet + IP + TCP)
     int total_header_len = sizeof(struct libnet_ethernet_hdr) + ip_hdr_len + tcp_hdr_len;
-    int data_len = header->caplen - total_header_len;
+
+    // [Check] 캡처된 패킷 길이가 전체 헤더 길이보다 작은지 확인 (truncated packet)
+    if (header->caplen < total_header_len) {
+        printf("Truncated packet detected: caplen = %d, expected header length = %d\n\n", header->caplen, total_header_len);
+        return;
+    }
+
+    // IP 헤더의 ip_len을 이용하여 실제 전송된 전체 IP 패킷 길이 계산 (헤더 + payload)
+    int total_ip_len = ntohs(ip_hdr->ip_len);
+
+    // [Check] 잘린 패킷의 경우, 실제 IP 길이가 캡처된 길이보다 클 수 있음.
+    if (total_ip_len > (header->caplen - sizeof(struct libnet_ethernet_hdr))) {
+        printf("Truncated IP packet: IP total length = %d, captured IP length = %d\n\n",
+                total_ip_len, header->caplen - (int)sizeof(struct libnet_ethernet_hdr));
+        return;
+    }
+
+    // Payload 추출 과정 및 잘린 패킷에 대한 예외 처리 
+    const u_char* data = tcp_packet + tcp_hdr_len;
+    int data_len = ntohs(ip_hdr->ip_len) - ip_hdr_len - tcp_hdr_len;
+    // int data_len = header->caplen - total_header_len; // 잘못된 계산 방식임
 
     // 캡쳐된 TCP 패킷 정보 출력 
     printf("===== TCP Packet Captured =====\n");
@@ -149,9 +176,17 @@ void packet_interpret(const u_char* packet, const struct pcap_pkthdr* header)
         // (4) Payload(Data)
     printf("Payload (up to %d bytes):\n", MAX_PRINT_LEN);
     int print_len = (data_len > MAX_PRINT_LEN) ? MAX_PRINT_LEN : data_len;
-    for (int i = 0; i < print_len; i++)
-        printf("%02x ", data[i]);
-    printf("\n\n");
+    if (print_len <= 0) {
+        printf("  -\n");
+    } else {
+        printf("  ");
+        for (int i = 0; i < print_len; i++) {
+            if (i > 0)
+                printf("|");
+            printf("%02x", data[i]);
+        }
+        printf("\n\n");
+    }
 }
 
 int main(int argc, char* argv[]) {
